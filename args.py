@@ -26,11 +26,18 @@ exp_group.add_argument('--save_suffix', default="", type=str, help='suffix when 
 
 # dataset related
 data_group = arg_parser.add_argument_group('data', 'dataset setting')
-data_group.add_argument('--dataset', metavar='D', default='cifar10', choices=['cifar10', 'cifar100', 'imagenet'], help='data to work on')
+data_group.add_argument('--dataset', metavar='D', default='tabular', choices=['tabular', 'cifar10', 'cifar100', 'imagenet'], help='data to work on')
 data_group.add_argument('--data-root', metavar='DIR', default='data', help='path to dataset (default: data)')
 data_group.add_argument('--use-valid', action='store_true', help='use validation set or not')
 data_group.add_argument('--workers', default=4, type=int, metavar='N', help='number of data loading workers (default: 4)')
 data_group.add_argument('--val_workers', default=1, type=int, metavar='N', help='number of data loading workers (default: 4)')
+
+# tabular data specific
+data_group.add_argument('--num_features', type=int, default=100, help='number of input features for tabular data')
+data_group.add_argument('--num_classes', type=int, default=2, help='number of output classes for tabular data')
+data_group.add_argument('--tabular_dataset', type=str, default='custom', 
+                       choices=['custom', 'adult', 'heloc', 'covertype', 'credit', 'diabetes'], 
+                       help='specific tabular dataset to use')
 
 # model arch related
 arch_group = arg_parser.add_argument_group('arch', 'model architecture setting')
@@ -41,12 +48,12 @@ arch_group.add_argument('--reduction', default=0.5, type=float, metavar='C', hel
 arch_group.add_argument('--nBlocks', type=int, default=1)
 arch_group.add_argument('--nChannels', type=int, default=32)
 arch_group.add_argument('--base', type=int, default=4)
-arch_group.add_argument('--stepmode', type=str, choices=['even', 'lin_grow'])
+arch_group.add_argument('--stepmode', type=str, default='even', choices=['even', 'lin_grow'])
 arch_group.add_argument('--step', type=int, default=1)
 arch_group.add_argument('--growthRate', type=int, default=6)
 arch_group.add_argument('--grFactor', default='1-2-4', type=str)
 arch_group.add_argument('--prune', default='max', choices=['min', 'max'])
-arch_group.add_argument('--bnFactor', default='1-2-4')
+arch_group.add_argument('--bnFactor', default='1-2-4', type=str)
 arch_group.add_argument('--bottleneck', default=True, type=bool)
 
 # ranet config
@@ -98,8 +105,11 @@ if args.dataset == 'cifar10':
     args.num_classes = 10
 elif args.dataset == 'cifar100':
     args.num_classes = 100
-else:
+elif args.dataset == 'imagenet':
     args.num_classes = 1000
+elif args.dataset == 'tabular':
+    # num_classes is already set by command line argument
+    pass
 
 args.lr_milestones = list(map(int, args.lr_milestones.split(',')))
 

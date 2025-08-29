@@ -75,15 +75,16 @@ def measure_layer(layer, x):
     ### ops_linear
     elif type_name in ['Linear']:
         weight_ops = layer.weight.numel() * multi_add
-        bias_ops = layer.bias.numel()
+        bias_ops = layer.bias.numel() if layer.bias is not None else 0
         delta_ops = x.size()[0] * (weight_ops + bias_ops)
         delta_params = get_layer_param(layer)
 
     ### ops_nothing
-    elif type_name in ['BatchNorm2d', 'Dropout2d', 'DropChannel', 'Dropout',
-                       'MSDNFirstLayer', 'ConvBasic', 'ConvBN',
-                       'ParallelModule', 'MSDNet', 'Sequential',
-                       'MSDNLayer', 'ConvDownNormal', 'ConvNormal', 'ClassifierModule']:
+    elif type_name in ['BatchNorm2d', 'BatchNorm1d', 'Dropout2d', 'DropChannel', 'Dropout',
+                       'MSDNFirstLayer', 'ConvBasic', 'ConvBN', 'LinearBasic', 'LinearBN',
+                       'ParallelModule', 'MSDNet', 'Sequential', 'TabularMSDNet', 'TabularRANet',
+                       'MSDNLayer', 'ConvDownNormal', 'ConvNormal', 'ClassifierModule',
+                       'TabularMSDNLayer', 'LinearDownNormal', 'LinearNormal', 'TabularClassifierModule']:
         delta_params = get_layer_param(layer)
 
 

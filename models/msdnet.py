@@ -3,6 +3,88 @@ import torch
 import math
 
 
+class LinearBasic(nn.Module):
+    def __init__(self, nIn, nOut, dropout=0.1):
+        super(LinearBasic, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(nIn, nOut, bias=False),
+            nn.BatchNorm1d(nOut),
+            nn.ReLU(True),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class LinearBN(nn.Module):
+    def __init__(self, nIn, nOut, type: str, bottleneck,
+                 bnWidth, dropout=0.1):
+        """
+        a basic linear layer in Tabular MSDNet, two types
+        :param nIn: input features
+        :param nOut: output features
+        :param type: normal or down (down reduces features)
+        :param bottleneck: use bottleneck or not
+        :param bnWidth: bottleneck factor
+        """
+        super(LinearBN, self).__init__()
+        layer = []
+        nInner = nIn
+        if bottleneck is True:
+            nInner = min(nInner, bnWidth * nOut)
+            layer.append(nn.Linear(nIn, nInner, bias=False))
+            layer.append(nn.BatchNorm1d(nInner))
+            layer.append(nn.ReLU(True))
+            layer.append(nn.Dropout(dropout))
+
+        if type == 'normal':
+            layer.append(nn.Linear(nInner, nOut, bias=False))
+        elif type == 'down':
+            layer.append(nn.Linear(nInner, nOut, bias=False))
+        else:
+            raise ValueError
+
+        layer.append(nn.BatchNorm1d(nOut))
+        layer.append(nn.ReLU(True))
+        layer.append(nn.Dropout(dropout))
+
+        self.net = nn.Sequential(*layer)
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class LinearDownNormal(nn.Module):
+    def __init__(self, nIn1, nIn2, nOut, bottleneck, bnWidth1, bnWidth2, dropout=0.1):
+        super(LinearDownNormal, self).__init__()
+        self.linear_down = LinearBN(nIn1, nOut // 2, 'down',
+                                bottleneck, bnWidth1, dropout)
+        self.linear_normal = LinearBN(nIn2, nOut // 2, 'normal',
+                                   bottleneck, bnWidth2, dropout)
+
+    def forward(self, x):
+        res = [x[1],
+               self.linear_down(x[0]),
+               self.linear_normal(x[1])]
+        return torch.cat(res, dim=1)
+
+
+class LinearNormal(nn.Module):
+    def __init__(self, nIn, nOut, bottleneck, bnWidth, dropout=0.1):
+        super(LinearNormal, self).__init__()
+        self.linear_normal = LinearBN(nIn, nOut, 'normal',
+                                   bottleneck, bnWidth, dropout)
+
+    def forward(self, x):
+        if not isinstance(x, list):
+            x = [x]
+        res = [x[0],
+               self.linear_normal(x[0])]
+
+        return torch.cat(res, dim=1)
+
+
 class ConvBasic(nn.Module):
     def __init__(self, nIn, nOut, kernel=3, stride=1,
                  padding=1):
@@ -343,3 +425,205 @@ class MSDNet(nn.Module):
             if i == stage:
                 break
         return res
+
+
+class TabularMSDNFirstLayer(nn.Module):
+    def __init__(self, nIn, nOut, args):
+        super(TabularMSDNFirstLayer, self).__init__()
+        self.layers = nn.ModuleList()
+        # For tabular data, we use a simple linear layer
+        self.layers.append(LinearBasic(nIn, nOut * args.grFactor[0]))
+        
+        nIn = nOut * args.grFactor[0]
+        
+        for i in range(1, args.nScales):
+            self.layers.append(LinearBasic(nIn, nOut * args.grFactor[i]))
+            nIn = nOut * args.grFactor[i]
+
+    def forward(self, x):
+        res = []
+        for i in range(len(self.layers)):
+            x = self.layers[i](x)
+            res.append(x)
+        return res
+
+
+class TabularMSDNLayer(nn.Module):
+    def __init__(self, nIn, nOut, args, inScales, outScales):
+        super(TabularMSDNLayer, self).__init__()
+        self.nOut = nOut
+        self.inScales = inScales if inScales is not None else args.nScales
+        self.outScales = outScales if outScales is not None else args.nScales
+
+        self.nScales = args.nScales
+        self.discard = self.inScales - self.outScales
+
+        self.offset = self.nScales - self.outScales
+        self.layers = nn.ModuleList()
+
+        if self.discard > 0:
+            nIn1 = nIn * args.grFactor[self.offset - 1]
+            nIn2 = nIn * args.grFactor[self.offset]
+            _nOut = nOut * args.grFactor[self.offset]
+            self.layers.append(LinearDownNormal(nIn1, nIn2, _nOut, args.bottleneck,
+                                              args.bnFactor[self.offset - 1],
+                                              args.bnFactor[self.offset]))
+        else:
+            self.layers.append(LinearNormal(nIn * args.grFactor[self.offset],
+                                          nOut * args.grFactor[self.offset],
+                                          args.bottleneck,
+                                          args.bnFactor[self.offset]))
+
+        for i in range(self.offset + 1, self.nScales):
+            nIn1 = nIn * args.grFactor[i - 1]
+            nIn2 = nIn * args.grFactor[i]
+            _nOut = nOut * args.grFactor[i]
+            self.layers.append(LinearDownNormal(nIn1, nIn2, _nOut, args.bottleneck,
+                                              args.bnFactor[i - 1],
+                                              args.bnFactor[i]))
+
+    def forward(self, x):
+        if self.discard > 0:
+            inp = []
+            for i in range(1, self.outScales + 1):
+                inp.append([x[i - 1], x[i]])
+        else:
+            inp = [[x[0]]]
+            for i in range(1, self.outScales):
+                inp.append([x[i - 1], x[i]])
+
+        res = []
+        for i in range(self.outScales):
+            res.append(self.layers[i](inp[i]))
+
+        return res
+
+
+class TabularClassifierModule(nn.Module):
+    def __init__(self, m, channel, num_classes):
+        super(TabularClassifierModule, self).__init__()
+        self.m = m
+        self.linear = nn.Linear(channel, num_classes)
+
+    def forward(self, x):
+        res = self.m(x[-1])
+        return self.linear(res)
+
+
+class TabularMSDNet(nn.Module):
+    def __init__(self, args):
+        super(TabularMSDNet, self).__init__()
+        self.blocks = nn.ModuleList()
+        self.classifier = nn.ModuleList()
+        self.nBlocks = args.nBlocks
+        self.steps = [args.base]
+        self.args = args
+        
+        n_layers_all, n_layer_curr = args.base, 0
+        for i in range(1, self.nBlocks):
+            self.steps.append(args.step if args.stepmode == 'even'
+                             else args.step * i + 1)
+            n_layers_all += self.steps[-1]
+
+        nIn = args.nChannels
+        for i in range(self.nBlocks):
+            m, nIn = \
+                self._build_block(nIn, args, self.steps[i],
+                                  n_layers_all, n_layer_curr)
+            self.blocks.append(m)
+            n_layer_curr += self.steps[i]
+
+            # For tabular data, use the specified number of classes
+            self.classifier.append(
+                self._build_classifier_tabular(nIn * args.grFactor[-1], args.num_classes))
+
+        for m in self.blocks:
+            if hasattr(m, '__iter__'):
+                for _m in m:
+                    self._init_weights(_m)
+            else:
+                self._init_weights(m)
+
+        for m in self.classifier:
+            if hasattr(m, '__iter__'):
+                for _m in m:
+                    self._init_weights(_m)
+            else:
+                self._init_weights(m)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                m.bias.data.zero_()
+        elif isinstance(m, nn.BatchNorm1d):
+            m.weight.data.fill_(1)
+            m.bias.data.zero_()
+
+    def _build_block(self, nIn, args, step, n_layer_all, n_layer_curr):
+        layers = [TabularMSDNFirstLayer(args.num_features, nIn, args)] \
+            if n_layer_curr == 0 else []
+        for i in range(step):
+            n_layer_curr += 1
+            inScales = args.nScales
+            outScales = args.nScales
+            if args.prune == 'min':
+                inScales = min(args.nScales, n_layer_all - n_layer_curr + 2)
+                outScales = min(args.nScales, n_layer_all - n_layer_curr + 1)
+            elif args.prune == 'max':
+                interval = math.ceil(1.0 * n_layer_all / args.nScales)
+                inScales = args.nScales - math.floor(1.0 * (max(0, n_layer_curr - 2)) / interval)
+                outScales = args.nScales - math.floor(1.0 * (n_layer_curr - 1) / interval)
+            else:
+                raise ValueError
+
+            layers.append(TabularMSDNLayer(nIn, args.growthRate, args, inScales, outScales))
+
+            nIn += args.growthRate
+            if args.prune == 'max' and inScales > outScales and \
+                    args.reduction > 0:
+                offset = args.nScales - outScales
+                layers.append(
+                    self._build_transition(nIn, math.floor(1.0 * args.reduction * nIn),
+                                           outScales, offset, args))
+                _t = nIn
+                nIn = math.floor(1.0 * args.reduction * nIn)
+            elif args.prune == 'min' and args.reduction > 0 and \
+                    ((n_layer_curr == math.floor(1.0 * n_layer_all / 3)) or
+                     n_layer_curr == math.floor(2.0 * n_layer_all / 3)):
+                offset = args.nScales - outScales
+                layers.append(self._build_transition(nIn, math.floor(1.0 * args.reduction * nIn),
+                                                     outScales, offset, args))
+
+                nIn = math.floor(1.0 * args.reduction * nIn)
+
+        return nn.Sequential(*layers), nIn
+
+    def _build_transition(self, nIn, nOut, outScales, offset, args):
+        net = []
+        for i in range(outScales):
+            net.append(LinearBasic(nIn * args.grFactor[offset + i],
+                                 nOut * args.grFactor[offset + i]))
+        return ParallelModule(net)
+
+    def _build_classifier_tabular(self, nIn, num_classes):
+        # Simple classifier for tabular data
+        classifier = nn.Sequential(
+            nn.Linear(nIn, nIn // 2),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(nIn // 2, num_classes)
+        )
+        return classifier
+
+    def forward(self, x):
+        # Process through all blocks without early exit
+        for i in range(self.nBlocks):
+            x = self.blocks[i](x)
+        
+        # For tabular data, we expect x to be a list, take the last element
+        if isinstance(x, list):
+            x = x[-1]
+        
+        # Return only the final classification result
+        return self.classifier[-1](x)

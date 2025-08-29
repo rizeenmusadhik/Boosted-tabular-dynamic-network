@@ -8,21 +8,21 @@ torch.multiprocessing.set_sharing_strategy('file_system')
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from models import msdnet, msdnet_ge, ranet, dynamic_net, dynamic_net_ranet
+from models import msdnet, msdnet_ge, ranet, dynamic_net, dynamic_net_ranet, TabularMSDNet, TabularRANet
 from op_counter import measure_model
 from dataloader import get_dataloaders
 from utils.utils import setup_logging
 from args import args
 
 
-def test(model, test_loader):
+def test(model, test_loader, device):
     model.eval_all()
 
     n_blocks = args.nBlocks * len(args.scale_list) if args.arch == 'ranet' else args.nBlocks
     corrects = [0] * n_blocks
     totals = [0] * n_blocks
     for x, y in test_loader:
-        x, y = x.cuda(), y.cuda()
+        x, y = x.to(device), y.to(device)
         with torch.no_grad():
             outs = model.forward(x)
         for i, out in enumerate(outs):
@@ -37,13 +37,13 @@ def log_step(step, name, value, sum_writer, silent=False):
     sum_writer.add_scalar(f'{name}', value, step)
 
 
-def train(model, train_loader, optimizer, epoch, sum_writer):
+def train(model, train_loader, optimizer, epoch, sum_writer, device):
     model.train_all()
-    criterion = torch.nn.CrossEntropyLoss().cuda()
+    criterion = torch.nn.CrossEntropyLoss().to(device)
 
     n_blocks = args.nBlocks * len(args.scale_list) if args.arch == 'ranet' else args.nBlocks
     for it, (x, y) in enumerate(train_loader):
-        x, y = x.cuda(), y.cuda()
+        x, y = x.to(device), y.to(device)
         preds, pred_ensembles = model.forward_all(x, n_blocks - 1)
         loss_all = 0
         for stage in range(n_blocks):
@@ -52,7 +52,7 @@ def train(model, train_loader, optimizer, epoch, sum_writer):
             with torch.no_grad():
                 if not isinstance(pred_ensembles[stage], torch.Tensor):
                     out = torch.unsqueeze(torch.Tensor([pred_ensembles[stage]]), 0)  # 1x1
-                    out = out.expand(x.shape[0], args.num_classes).cuda()
+                    out = out.expand(x.shape[0], args.num_classes).to(device)
                 else:
                     out = pred_ensembles[stage]
                 out = out.detach()
@@ -75,16 +75,30 @@ def main():
     sum_writer = SummaryWriter(os.path.join(args.result_dir, 'summary'))
 
     if args.arch == 'msdnet':
-        model_func = msdnet
+        if args.dataset == 'tabular':
+            model_func = TabularMSDNet
+        else:
+            model_func = msdnet
     elif args.arch == 'msdnet_ge':
-        model_func = msdnet_ge
+        if args.dataset == 'tabular':
+            model_func = TabularMSDNet  # Use tabular version for now
+        else:
+            model_func = msdnet_ge
     elif args.arch == 'ranet':
-        model_func = ranet
+        if args.dataset == 'tabular':
+            model_func = TabularRANet
+        else:
+            model_func = ranet
     else:
         raise Exception('unknown model name')
 
-    backbone = model_func(args)
-    n_flops, n_params = measure_model(backbone, 32, 32)
+    if args.dataset == 'tabular':
+        # For tabular data, we need to pass the input size
+        backbone = model_func(args)
+        n_flops, n_params = measure_model(backbone, args.num_features, 1)  # 1 for batch dimension
+    else:
+        backbone = model_func(args)
+        n_flops, n_params = measure_model(backbone, 32, 32)
     torch.save(n_flops, os.path.join(args.result_dir, 'flops.pth'))
     n_blocks = args.nBlocks * len(args.scale_list) if args.arch == 'ranet' else args.nBlocks
     for i in range(n_blocks):
@@ -92,6 +106,10 @@ def main():
         log_step(i, 'model_macs', n_flops[i], sum_writer)
     del(backbone)
 
+    # Set device (GPU if available, else CPU)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
     backbone = model_func(args)
     if args.arch == 'ranet':
         model = dynamic_net_ranet(backbone, args).cuda_all()
@@ -126,14 +144,14 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         logging.info(f'epoch {epoch}')
 
-        train(model, train_loader, optimizer, epoch, sum_writer)
+        train(model, train_loader, optimizer, epoch, sum_writer, device)
         scheduler.step()
 
-        accus_test = test(model, val_loader)
+        accus_test = test(model, val_loader, device)
         for i, accu in enumerate(accus_test):
             log_step((epoch + 1) * len(train_loader), f'stage_{i}_accu', accu, sum_writer)
 
-        accus_train = test(model, train_loader)
+        accus_train = test(model, train_loader, device)
         for i, accu in enumerate(accus_train):
             log_step((epoch + 1) * len(train_loader), f'stage_{i}_accu_train', accu, sum_writer)
 

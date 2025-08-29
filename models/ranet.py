@@ -418,6 +418,178 @@ class ClassifierModule(nn.Module):
         return self.linear(res)
 
 
+class LinearBasic(nn.Module):
+    def __init__(self, nIn, nOut, dropout=0.1):
+        super(LinearBasic, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(nIn, nOut, bias=False),
+            nn.BatchNorm1d(nOut),
+            nn.ReLU(True),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class LinearBN(nn.Module):
+    def __init__(self, nIn, nOut, type: str, bnAfter, bnWidth, dropout=0.1):
+        """
+        a basic linear layer in Tabular RANet, two types
+        :param nIn: input features
+        :param nOut: output features
+        :param type: normal or down
+        :param bnAfter: the location of batch Norm
+        :param bnWidth: bottleneck factor
+        """
+        super(LinearBN, self).__init__()
+        layer = []
+        nInner = nIn
+        if bnAfter is True:
+            nInner = min(nInner, bnWidth * nOut)
+            layer.append(nn.Linear(nIn, nInner, bias=False))
+            layer.append(nn.BatchNorm1d(nInner))
+            layer.append(nn.ReLU(True))
+            if type == 'normal':
+                layer.append(nn.Linear(nInner, nOut, bias=False))
+            elif type == 'down':
+                layer.append(nn.Linear(nInner, nOut, bias=False))
+            else:
+                raise ValueError
+            layer.append(nn.BatchNorm1d(nOut))
+            layer.append(nn.ReLU(True))        
+        
+        else:        
+            nInner = min(nInner, bnWidth * nOut)
+            layer.append(nn.BatchNorm1d(nIn))
+            layer.append(nn.ReLU(True))
+            layer.append(nn.Linear(nIn, nInner, bias=False))
+            layer.append(nn.BatchNorm1d(nInner))
+            layer.append(nn.ReLU(True))        
+            if type == 'normal':
+                layer.append(nn.Linear(nInner, nOut, bias=False))
+            elif type == 'down':
+                layer.append(nn.Linear(nInner, nOut, bias=False))
+            else:
+                raise ValueError
+        
+        self.net = nn.Sequential(*layer)
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class LinearUpNormal(nn.Module):
+    def __init__(self, nIn1, nIn2, nOut, bottleneck, bnWidth1, bnWidth2, compress_factor, down_sample, dropout=0.1):
+        '''
+        The linear layer with normal and up-sampling connection for tabular data.
+        '''
+        super(LinearUpNormal, self).__init__()
+        self.linear_up = LinearBN(nIn2, math.floor(nOut*compress_factor), 'normal',
+                                bottleneck, bnWidth2, dropout)
+        if down_sample:
+            self.linear_normal = LinearBN(nIn1, nOut-math.floor(nOut*compress_factor), 'down',
+                                    bottleneck, bnWidth1, dropout)
+        else:
+            self.linear_normal = LinearBN(nIn1, nOut-math.floor(nOut*compress_factor), 'normal',
+                                    bottleneck, bnWidth1, dropout)
+ 
+    def forward(self, x):
+        res = self.linear_normal(x[1])
+        res = [x[1],
+               self.linear_up(x[0]),
+               res]
+        return torch.cat(res, dim=1)
+
+
+class TabularRANet(nn.Module):
+    def __init__(self, args):
+        super(TabularRANet, self).__init__()
+        self.args = args
+        self.nScales = len(args.scale_list)
+        self.nBlocks = args.nBlocks
+        self.step = args.block_step
+        
+        # First layer for tabular data
+        self.first_layer = LinearBasic(args.num_features, args.nChannels * args.scale_list[0])
+        
+        # Build blocks
+        self.blocks = nn.ModuleList()
+        nIn = args.nChannels * args.scale_list[0]
+        
+        for i in range(self.nBlocks):
+            block = self._build_block(nIn, args)
+            self.blocks.append(block)
+            nIn = args.nChannels * args.scale_list[-1]  # Output of last scale
+        
+        # Classifiers
+        self.classifiers = nn.ModuleList()
+        for i in range(self.nBlocks):
+            classifier = nn.Sequential(
+                nn.Linear(nIn, nIn // 2),
+                nn.ReLU(),
+                nn.Dropout(0.5),
+                nn.Linear(nIn // 2, args.num_classes)
+            )
+            self.classifiers.append(classifier)
+    
+    def _build_block(self, nIn, args):
+        """Build a RANet block for tabular data"""
+        layers = []
+        nIn_curr = nIn
+        
+        for i in range(self.step):
+            # Create layers for each scale
+            scale_layers = []
+            for j, scale in enumerate(args.scale_list):
+                if j == 0:
+                    # First scale
+                    layer = LinearBasic(nIn_curr, args.nChannels * scale)
+                else:
+                    # Other scales
+                    layer = LinearUpNormal(
+                        nIn_curr, 
+                        args.nChannels * args.scale_list[j-1], 
+                        args.nChannels * scale,
+                        args.bottleneck,
+                        args.bnFactor[j-1],
+                        args.bnFactor[j],
+                        args.compress_factor,
+                        False
+                    )
+                scale_layers.append(layer)
+            
+            layers.append(ParallelModule(scale_layers))
+            nIn_curr = args.nChannels * args.scale_list[-1]
+        
+        return nn.Sequential(*layers)
+    
+    def forward(self, x):
+        # First layer
+        x = self.first_layer(x)
+        x = [x] * self.nScales  # Initialize all scales
+        
+        # Process through all blocks without early exit
+        for i, block in enumerate(self.blocks):
+            x = block(x)
+        
+        # Return only the final classification result
+        return self.classifiers[-1](x[-1])
+
+
+class ParallelModule(nn.Module):
+    """Parallel module for tabular data"""
+    def __init__(self, parallel_modules):
+        super(ParallelModule, self).__init__()
+        self.m = nn.ModuleList(parallel_modules)
+
+    def forward(self, x):
+        res = []
+        for i in range(len(x)):
+            res.append(self.m[i](x[i]))
+        return res
+
+
 if __name__ == '__main__':
     from args_v5 import arg_parser
     from op_counter import measure_model    
