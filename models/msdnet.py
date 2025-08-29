@@ -616,14 +616,19 @@ class TabularMSDNet(nn.Module):
         )
         return classifier
 
-    def forward(self, x):
-        # Process through all blocks without early exit
+    def forward(self, x, stage=None):
+        # Process through blocks and collect classifier outputs (following original MSDNet interface)
+        res = []
         for i in range(self.nBlocks):
             x = self.blocks[i](x)
-        
-        # For tabular data, we expect x to be a list, take the last element
-        if isinstance(x, list):
-            x = x[-1]
-        
-        # Return only the final classification result
-        return self.classifier[-1](x)
+            
+            # For tabular data, x might be a list, take the last element for classification
+            if isinstance(x, list):
+                classifier_input = x[-1]
+            else:
+                classifier_input = x
+            
+            res.append(self.classifier[i](classifier_input))
+            if i == stage:
+                break
+        return res

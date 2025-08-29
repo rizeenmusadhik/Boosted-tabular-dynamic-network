@@ -564,17 +564,19 @@ class TabularRANet(nn.Module):
         
         return nn.Sequential(*layers)
     
-    def forward(self, x):
+    def forward(self, x, stage=None):
         # First layer
         x = self.first_layer(x)
         x = [x] * self.nScales  # Initialize all scales
         
-        # Process through all blocks without early exit
+        # Process through blocks and collect classifier outputs (following original RANet interface)
+        res = []
         for i, block in enumerate(self.blocks):
             x = block(x)
-        
-        # Return only the final classification result
-        return self.classifiers[-1](x[-1])
+            res.append(self.classifiers[i](x[-1]))  # Use the highest scale output for classification
+            if i == stage:
+                break
+        return res
 
 
 class ParallelModule(nn.Module):

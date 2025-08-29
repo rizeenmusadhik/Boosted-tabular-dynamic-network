@@ -88,6 +88,7 @@ class DynamicNet(object):
         assert 0 <= stage < self.nBlocks
         outs = self.model(x, stage)
         preds = [0]
+
         for i in range(len(outs)):
             pred = (outs[i] + preds[-1]) * self.reweight[i]
             preds.append(pred)
