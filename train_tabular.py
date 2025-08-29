@@ -20,6 +20,9 @@ def test(model, test_loader, device):
 
     correct = 0
     total = 0
+    all_predictions = []
+    all_targets = []
+    
     for x, y in test_loader:
         x, y = x.to(device), y.to(device)
         with torch.no_grad():
@@ -27,9 +30,26 @@ def test(model, test_loader, device):
             _, predicted = torch.max(outputs.data, 1)
             total += y.size(0)
             correct += (predicted == y).sum().item()
+            
+            # Store predictions and targets for AUC calculation
+            probabilities = torch.softmax(outputs, dim=1)
+            all_predictions.append(probabilities[:, 1].cpu().numpy())  # Probability of positive class
+            all_targets.append(y.cpu().numpy())
     
+    # Calculate accuracy
     accuracy = 100 * correct / total
-    return accuracy
+    
+    # Calculate AUC
+    from sklearn.metrics import roc_auc_score
+    all_predictions = np.concatenate(all_predictions)
+    all_targets = np.concatenate(all_targets)
+    
+    try:
+        auc = roc_auc_score(all_targets, all_predictions)
+    except ValueError:
+        auc = 0.5  # Default value if AUC cannot be calculated
+    
+    return accuracy, auc
 
 
 def log_step(step, name, value, sum_writer, silent=False):
@@ -81,7 +101,6 @@ def main():
     os.makedirs(args.result_dir, exist_ok=True)
     
     setup_logging(os.path.join(args.result_dir, 'log.txt'))
-    logging.info("running arguments: %s", args)
     sum_writer = SummaryWriter(os.path.join(args.result_dir, 'summary'))
 
     if args.arch == 'msdnet':
@@ -98,7 +117,12 @@ def main():
     print(f"Using device: {device}")
     
     # Load data first to get the correct number of features
+    print(f"Before data loading - num_features: {args.num_features}")
     train_loader, val_loader, _ = get_dataloaders(args)
+    print(f"After data loading - num_features: {args.num_features}")
+    
+    # Log arguments AFTER data loading (so num_features is correct)
+    logging.info("running arguments: %s", args)
     
     # Now create the model with the correct number of features
     model = model_func(args).to(device)
@@ -127,23 +151,39 @@ def main():
 
     # Training loop
     best_acc = 0
+    best_auc = 0
     for epoch in range(args.start_epoch, args.epochs):
         train(model, train_loader, optimizer, epoch, sum_writer, device)
         scheduler.step()
 
         # Validation
         if epoch % 10 == 0:
-            accuracy = test(model, val_loader, device)
-            logging.info(f'Epoch {epoch}: Accuracy: {accuracy:.2f}%')
+            # Run multiple validation passes for standard deviation
+            accuracies = []
+            aucs = []
+            for _ in range(5):  # 5 runs for std calculation
+                accuracy, auc = test(model, val_loader, device)
+                accuracies.append(accuracy)
+                aucs.append(auc)
             
-            # Save best model
-            if accuracy > best_acc:
-                best_acc = accuracy
+            # Calculate mean and standard deviation
+            mean_acc = np.mean(accuracies)
+            std_acc = np.std(accuracies)
+            mean_auc = np.mean(aucs)
+            std_auc = np.std(aucs)
+            
+            logging.info(f'Epoch {epoch}: Accuracy: {mean_acc:.2f}% ± {std_acc:.2f}%, AUC: {mean_auc:.4f} ± {std_auc:.4f}')
+            
+            # Save best model based on accuracy
+            if mean_acc > best_acc:
+                best_acc = mean_acc
+                best_auc = mean_auc
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'best_acc': best_acc,
+                    'best_auc': best_auc,
                 }, os.path.join(args.result_dir, 'best_model.pth'))
 
         # Save checkpoint
@@ -153,6 +193,30 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
             }, os.path.join(args.result_dir, f'checkpoint_epoch_{epoch}.pth'))
+    
+    # Final evaluation
+    print(f"\n{'='*60}")
+    print("FINAL EVALUATION")
+    print(f"{'='*60}")
+    
+    # Run multiple final validation passes
+    final_accuracies = []
+    final_aucs = []
+    for _ in range(10):  # 10 runs for final std calculation
+        accuracy, auc = test(model, val_loader, device)
+        final_accuracies.append(accuracy)
+        final_aucs.append(auc)
+    
+    final_mean_acc = np.mean(final_accuracies)
+    final_std_acc = np.std(final_accuracies)
+    final_mean_auc = np.mean(final_aucs)
+    final_std_auc = np.std(final_aucs)
+    
+    print(f"Final Accuracy: {final_mean_acc:.2f}% ± {final_std_acc:.2f}%")
+    print(f"Final AUC: {final_mean_auc:.4f} ± {final_std_auc:.4f}")
+    print(f"Best Accuracy: {best_acc:.2f}%")
+    print(f"Best AUC: {best_auc:.4f}")
+    print(f"{'='*60}")
 
 
 if __name__ == '__main__':
