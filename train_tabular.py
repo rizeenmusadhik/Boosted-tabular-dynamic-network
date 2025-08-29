@@ -184,6 +184,15 @@ def main():
                     'optimizer_state_dict': optimizer.state_dict(),
                     'best_acc': best_acc,
                     'best_auc': best_auc,
+                    # Persist full training configuration for reliable evaluation
+                    'args': vars(args),
+                    'meta': {
+                        'dataset': args.dataset,
+                        'tabular_dataset': getattr(args, 'tabular_dataset', None),
+                        'num_features': getattr(args, 'num_features', None),
+                        'num_classes': getattr(args, 'num_classes', None),
+                        'arch': args.arch,
+                    }
                 }, os.path.join(args.result_dir, 'best_model.pth'))
 
         # Save checkpoint
@@ -192,6 +201,15 @@ def main():
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                # Persist full training configuration for reliable evaluation
+                'args': vars(args),
+                'meta': {
+                    'dataset': args.dataset,
+                    'tabular_dataset': getattr(args, 'tabular_dataset', None),
+                    'num_features': getattr(args, 'num_features', None),
+                    'num_classes': getattr(args, 'num_classes', None),
+                    'arch': args.arch,
+                }
             }, os.path.join(args.result_dir, f'checkpoint_epoch_{epoch}.pth'))
     
     # Final evaluation

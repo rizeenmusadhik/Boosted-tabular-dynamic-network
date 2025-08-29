@@ -182,6 +182,9 @@ def load_heloc():
     # Convert target to binary (0, 1)
     y = (y == 'Good').astype(int)
     
+    # Ensure we have both classes
+    print(f"HELOC classes distribution: {dict(zip(*np.unique(y, return_counts=True)))}")
+    
     print(f"HELOC dataset loaded: {X.shape[0]} samples, {X.shape[1]} features")
     return X, y
 
@@ -203,7 +206,15 @@ def load_covertype():
     y = y.to_numpy()
     
     # Convert target to 0-based indexing (original is 1-7)
-    y = y - 1
+    # Handle string targets
+    if y.dtype == 'object':
+        from sklearn.preprocessing import LabelEncoder
+        le = LabelEncoder()
+        y = le.fit_transform(y)
+    else:
+        y = y - 1
+    
+    print(f"Covertype classes distribution: {dict(zip(*np.unique(y, return_counts=True)))}")
     
     print(f"Covertype dataset loaded: {X.shape[0]} samples, {X.shape[1]} features")
     return X, y
