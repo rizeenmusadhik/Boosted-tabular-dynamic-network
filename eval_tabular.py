@@ -8,7 +8,7 @@ import logging
 import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
-from sklearn.metrics import roc_auc_score, accuracy_score, classification_report
+from sklearn.metrics import roc_auc_score, accuracy_score, classification_report, r2_score
 
 from models import TabularMSDNet, TabularRANet
 from dataloader import get_dataloaders
@@ -16,87 +16,172 @@ from args import arg_parser
 from utils.utils import setup_logging
 
 
-def evaluate_model(model, test_loader, device):
+def evaluate_model(model, test_loader, device, task_type='classification'):
     """Evaluate model on test set with multiple metrics"""
     model.eval()
     
-    all_predictions = []
-    all_probabilities = []
-    all_targets = []
+    if task_type == 'regression':
+        # Regression evaluation
+        all_predictions = []
+        all_targets = []
+        total_mse = 0.0
+        total_mae = 0.0
+        total_samples = 0
+        
+        with torch.no_grad():
+            for x, y in test_loader:
+                x, y = x.to(device), y.to(device)
+                
+                # Forward pass
+                outputs = model(x).squeeze()  # Remove extra dimensions for regression
+                
+                # Calculate MSE and MAE
+                mse = torch.nn.functional.mse_loss(outputs, y, reduction='sum')
+                mae = torch.nn.functional.l1_loss(outputs, y, reduction='sum')
+                
+                total_mse += mse.item()
+                total_mae += mae.item()
+                total_samples += y.size(0)
+                
+                # Store results
+                all_predictions.append(outputs.cpu().numpy())
+                all_targets.append(y.cpu().numpy())
+        
+        # Concatenate all batches
+        all_predictions = np.concatenate(all_predictions)
+        all_targets = np.concatenate(all_targets)
+        
+        # Calculate final metrics
+        mse = total_mse / total_samples
+        mae = total_mae / total_samples
+        rmse = np.sqrt(mse)
+        
+        # Calculate R² score
+        r2 = r2_score(all_targets, all_predictions)
+        
+        return {
+            'mse': mse,
+            'mae': mae,
+            'rmse': rmse,
+            'r2': r2,
+            'predictions': all_predictions,
+            'targets': all_targets
+        }
     
-    with torch.no_grad():
-        for x, y in test_loader:
-            x, y = x.to(device), y.to(device)
-            
-            # Forward pass
-            outputs = model(x)
-            probabilities = torch.softmax(outputs, dim=1)
-            _, predicted = torch.max(outputs.data, 1)
-            
-            # Store results
-            all_predictions.append(predicted.cpu().numpy())
-            all_probabilities.append(probabilities[:, 1].cpu().numpy())  # Probability of positive class
-            all_targets.append(y.cpu().numpy())
-    
-    # Concatenate all batches
-    all_predictions = np.concatenate(all_predictions)
-    all_probabilities = np.concatenate(all_probabilities)
-    all_targets = np.concatenate(all_targets)
-    
-    # Calculate metrics
-    accuracy = accuracy_score(all_targets, all_predictions) * 100
-    
-    try:
-        auc = roc_auc_score(all_targets, all_probabilities)
-    except ValueError:
-        auc = 0.5  # Default value if AUC cannot be calculated
-    
-    # Generate classification report
-    report = classification_report(all_targets, all_predictions, output_dict=True)
-    
-    return {
-        'accuracy': accuracy,
-        'auc': auc,
-        'predictions': all_predictions,
-        'probabilities': all_probabilities,
-        'targets': all_targets,
-        'classification_report': report
-    }
+    else:
+        # Classification evaluation (original code)
+        all_predictions = []
+        all_probabilities = []
+        all_targets = []
+        
+        with torch.no_grad():
+            for x, y in test_loader:
+                x, y = x.to(device), y.to(device)
+                
+                # Forward pass
+                outputs = model(x)
+                probabilities = torch.softmax(outputs, dim=1)
+                _, predicted = torch.max(outputs.data, 1)
+                
+                # Store results
+                all_predictions.append(predicted.cpu().numpy())
+                if outputs.shape[1] >= 2:  # Binary or multi-class
+                    all_probabilities.append(probabilities[:, 1].cpu().numpy() if outputs.shape[1] == 2 else probabilities.cpu().numpy())
+                else:  # Single class (shouldn't happen in classification)
+                    all_probabilities.append(probabilities.cpu().numpy())
+                all_targets.append(y.cpu().numpy())
+        
+        # Concatenate all batches
+        all_predictions = np.concatenate(all_predictions)
+        all_probabilities = np.concatenate(all_probabilities)
+        all_targets = np.concatenate(all_targets)
+        
+        # Calculate metrics
+        accuracy = accuracy_score(all_targets, all_predictions) * 100
+        
+        try:
+            if len(np.unique(all_targets)) > 2:  # Multi-class
+                auc = roc_auc_score(all_targets, all_probabilities, multi_class='ovr', average='macro')
+            else:  # Binary
+                auc = roc_auc_score(all_targets, all_probabilities)
+        except ValueError:
+            auc = 0.5  # Default value if AUC cannot be calculated
+        
+        # Generate classification report
+        report = classification_report(all_targets, all_predictions, output_dict=True)
+        
+        return {
+            'accuracy': accuracy,
+            'auc': auc,
+            'predictions': all_predictions,
+            'probabilities': all_probabilities,
+            'targets': all_targets,
+            'classification_report': report
+        }
 
 
-def run_multiple_evaluations(model, test_loader, device, n_runs=10):
+def run_multiple_evaluations(model, test_loader, device, task_type='classification', n_runs=10):
     """Run multiple evaluations to get standard deviation"""
     print(f"Running {n_runs} evaluation runs for standard deviation...")
     
-    accuracies = []
-    aucs = []
-    
-    for run in range(n_runs):
-        if run % 2 == 0:
-            print(f"  Run {run + 1}/{n_runs}")
+    if task_type == 'regression':
+        mses, maes, rmses, r2s = [], [], [], []
         
-        # Set different random seeds for each run
-        torch.manual_seed(42 + run)
-        np.random.seed(42 + run)
+        for run in range(n_runs):
+            if run % 2 == 0:
+                print(f"  Run {run + 1}/{n_runs}")
+            
+            # Set different random seeds for each run
+            torch.manual_seed(42 + run)
+            np.random.seed(42 + run)
+            
+            results = evaluate_model(model, test_loader, device, task_type)
+            mses.append(results['mse'])
+            maes.append(results['mae'])
+            rmses.append(results['rmse'])
+            r2s.append(results['r2'])
         
-        results = evaluate_model(model, test_loader, device)
-        accuracies.append(results['accuracy'])
-        aucs.append(results['auc'])
+        # Calculate statistics
+        return {
+            'mse_mean': np.mean(mses),
+            'mse_std': np.std(mses),
+            'mae_mean': np.mean(maes),
+            'mae_std': np.std(maes),
+            'rmse_mean': np.mean(rmses),
+            'rmse_std': np.std(rmses),
+            'r2_mean': np.mean(r2s),
+            'r2_std': np.std(r2s),
+            'mse_values': mses,
+            'mae_values': maes,
+            'rmse_values': rmses,
+            'r2_values': r2s
+        }
     
-    # Calculate statistics
-    mean_acc = np.mean(accuracies)
-    std_acc = np.std(accuracies)
-    mean_auc = np.mean(aucs)
-    std_auc = np.std(aucs)
-    
-    return {
-        'accuracy_mean': mean_acc,
-        'accuracy_std': std_acc,
-        'auc_mean': mean_auc,
-        'auc_std': std_auc,
-        'accuracy_values': accuracies,
-        'auc_values': aucs
-    }
+    else:
+        accuracies = []
+        aucs = []
+        
+        for run in range(n_runs):
+            if run % 2 == 0:
+                print(f"  Run {run + 1}/{n_runs}")
+            
+            # Set different random seeds for each run
+            torch.manual_seed(42 + run)
+            np.random.seed(42 + run)
+            
+            results = evaluate_model(model, test_loader, device, task_type)
+            accuracies.append(results['accuracy'])
+            aucs.append(results['auc'])
+        
+        # Calculate statistics
+        return {
+            'accuracy_mean': np.mean(accuracies),
+            'accuracy_std': np.std(accuracies),
+            'auc_mean': np.mean(aucs),
+            'auc_std': np.std(aucs),
+            'accuracy_values': accuracies,
+            'auc_values': aucs
+        }
 
 
 def main():
@@ -227,7 +312,11 @@ def main():
                 args.num_features = detected_features
     except Exception as e:
         logging.warning(f"Could not verify dataset feature count: {e}")
-    print(f"Dataset loaded: {args.num_features} features, {args.num_classes} classes")
+    
+    # Determine task type
+    task_type = getattr(args, 'task_type', 'classification')
+    print(f"Dataset loaded: {args.num_features} features, {args.num_classes} {'outputs' if task_type == 'regression' else 'classes'}")
+    print(f"Task type: {task_type}")
     
     # Create model
     if args.arch == 'msdnet':
@@ -246,10 +335,16 @@ def main():
     # checkpoint already loaded on CPU; move tensors to device afterwards
     model.load_state_dict(checkpoint['model_state_dict'])
     
-    if 'best_acc' in checkpoint:
-        print(f"Best training accuracy: {checkpoint['best_acc']:.2f}%")
-    if 'best_auc' in checkpoint:
-        print(f"Best training AUC: {checkpoint['best_auc']:.4f}")
+    if task_type == 'regression':
+        if 'best_mse' in checkpoint:
+            print(f"Best training MSE: {checkpoint['best_mse']:.4f}")
+        if 'best_r2' in checkpoint:
+            print(f"Best training R²: {checkpoint['best_r2']:.4f}")
+    else:
+        if 'best_acc' in checkpoint:
+            print(f"Best training accuracy: {checkpoint['best_acc']:.2f}%")
+        if 'best_auc' in checkpoint:
+            print(f"Best training AUC: {checkpoint['best_auc']:.4f}")
     
     # Evaluate on test set
     print("\n" + "="*60)
@@ -258,17 +353,30 @@ def main():
     
     # Single evaluation
     print("\nSingle evaluation:")
-    results = evaluate_model(model, test_loader, device)
-    print(f"Accuracy: {results['accuracy']:.2f}%")
-    print(f"AUC: {results['auc']:.4f}")
+    results = evaluate_model(model, test_loader, device, task_type)
+    
+    if task_type == 'regression':
+        print(f"MSE: {results['mse']:.4f}")
+        print(f"MAE: {results['mae']:.4f}")
+        print(f"RMSE: {results['rmse']:.4f}")
+        print(f"R²: {results['r2']:.4f}")
+    else:
+        print(f"Accuracy: {results['accuracy']:.2f}%")
+        print(f"AUC: {results['auc']:.4f}")
     
     # Multiple evaluations for standard deviation
     print("\nMultiple evaluations (with standard deviation):")
-    stats = run_multiple_evaluations(model, test_loader, device, n_runs=10)
+    stats = run_multiple_evaluations(model, test_loader, device, task_type, n_runs=10)
     
     print(f"\nFinal Results:")
-    print(f"Accuracy: {stats['accuracy_mean']:.2f}% ± {stats['accuracy_std']:.2f}%")
-    print(f"AUC: {stats['auc_mean']:.4f} ± {stats['auc_std']:.4f}")
+    if task_type == 'regression':
+        print(f"MSE: {stats['mse_mean']:.4f} ± {stats['mse_std']:.4f}")
+        print(f"MAE: {stats['mae_mean']:.4f} ± {stats['mae_std']:.4f}")
+        print(f"RMSE: {stats['rmse_mean']:.4f} ± {stats['rmse_std']:.4f}")
+        print(f"R²: {stats['r2_mean']:.4f} ± {stats['r2_std']:.4f}")
+    else:
+        print(f"Accuracy: {stats['accuracy_mean']:.2f}% ± {stats['accuracy_std']:.2f}%")
+        print(f"AUC: {stats['auc_mean']:.4f} ± {stats['auc_std']:.4f}")
     
     # Save results
     result_dir = os.path.dirname(args.evaluate_from)
@@ -278,6 +386,7 @@ def main():
         'model_path': args.evaluate_from,
         'dataset': args.tabular_dataset,
         'architecture': args.arch,
+        'task_type': task_type,
         'num_features': args.num_features,
         'num_classes': args.num_classes
     }

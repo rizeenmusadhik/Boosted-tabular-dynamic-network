@@ -607,7 +607,7 @@ class TabularMSDNet(nn.Module):
         return ParallelModule(net)
 
     def _build_classifier_tabular(self, nIn, num_classes):
-        # Simple classifier for tabular data
+        # Simple classifier for tabular data (classification or regression)
         classifier = nn.Sequential(
             nn.Linear(nIn, nIn // 2),
             nn.ReLU(),

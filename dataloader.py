@@ -220,6 +220,36 @@ def load_covertype():
     return X, y
 
 
+def load_california_housing():
+    """Load California Housing dataset from OpenML"""
+    if not OPENML_AVAILABLE:
+        raise ImportError("OpenML not available. Install with: pip install openml")
+    
+    print("Loading California Housing dataset...")
+    dataset = openml.datasets.get_dataset(537)  # California housing dataset ID
+    data = dataset.get_data(
+        target=dataset.default_target_attribute
+    )
+    X, y = data[0], data[1]
+    
+    # Convert to numpy arrays
+    X = X.to_numpy()
+    y = y.to_numpy()
+    
+    # Handle missing values if any
+    from sklearn.impute import SimpleImputer
+    if np.isnan(X).any():
+        imputer = SimpleImputer(strategy='median')
+        X = imputer.fit_transform(X)
+    
+    # Ensure target is float for regression
+    y = y.astype(float)
+    
+    print(f"California Housing dataset loaded: {X.shape[0]} samples, {X.shape[1]} features")
+    print(f"Target range: [{y.min():.2f}, {y.max():.2f}], mean: {y.mean():.2f}")
+    return X, y
+
+
 def create_tabular_data(args):
     """Create tabular data from various sources"""
     if args.tabular_dataset == 'custom':
@@ -232,6 +262,7 @@ def create_tabular_data(args):
             n_redundant=args.num_features // 4,
             random_state=42
         )
+        args.task_type = 'classification'
         print(f"Custom synthetic dataset created: {X.shape[0]} samples, {X.shape[1]} features")
         
     elif args.tabular_dataset == 'adult':
@@ -239,18 +270,28 @@ def create_tabular_data(args):
         X, y = load_adult_income()
         args.num_features = X.shape[1]
         args.num_classes = len(np.unique(y))
+        args.task_type = 'classification'
         
     elif args.tabular_dataset == 'heloc':
         # Load real HELOC dataset
         X, y = load_heloc()
         args.num_features = X.shape[1]
         args.num_classes = len(np.unique(y))
+        args.task_type = 'classification'
         
     elif args.tabular_dataset == 'covertype':
         # Load real Covertype dataset
         X, y = load_covertype()
         args.num_features = X.shape[1]
         args.num_classes = len(np.unique(y))
+        args.task_type = 'classification'
+        
+    elif args.tabular_dataset == 'california_housing':
+        # Load real California Housing dataset (regression)
+        X, y = load_california_housing()
+        args.num_features = X.shape[1]
+        args.num_classes = 1  # Regression: single continuous output
+        args.task_type = 'regression'  # Mark as regression task
         
     elif args.tabular_dataset == 'credit':
         # Credit card fraud simulation (keeping for backward compatibility)
@@ -264,6 +305,7 @@ def create_tabular_data(args):
         )
         args.num_features = 30
         args.num_classes = 2
+        args.task_type = 'classification'
         print(f"Credit card fraud simulation created: {X.shape[0]} samples, {X.shape[1]} features")
         
     elif args.tabular_dataset == 'diabetes':
@@ -278,6 +320,7 @@ def create_tabular_data(args):
         )
         args.num_features = 8
         args.num_classes = 2
+        args.task_type = 'classification'
         print(f"Diabetes simulation created: {X.shape[0]} samples, {X.shape[1]} features")
     
     else:
@@ -293,8 +336,22 @@ def create_tabular_data(args):
     X_val = scaler.transform(X_val)
     X_test = scaler.transform(X_test)
     
+    # Scale targets for regression tasks
+    if getattr(args, 'task_type', 'classification') == 'regression':
+        target_scaler = StandardScaler()
+        y_train = target_scaler.fit_transform(y_train.reshape(-1, 1)).flatten()
+        y_val = target_scaler.transform(y_val.reshape(-1, 1)).flatten()
+        y_test = target_scaler.transform(y_test.reshape(-1, 1)).flatten()
+        
+        # Store scaler for later use (e.g., in evaluation)
+        args.target_scaler = target_scaler
+        print(f"Target scaling applied - Original range: [{y.min():.2f}, {y.max():.2f}], Scaled range: [{y_train.min():.2f}, {y_train.max():.2f}]")
+    
     print(f"Data split: Train={X_train.shape[0]}, Val={X_val.shape[0]}, Test={X_test.shape[0]}")
-    print(f"Classes: {np.unique(y_train)}")
+    if getattr(args, 'task_type', 'classification') == 'regression':
+        print(f"Target range: [{y_train.min():.2f}, {y_train.max():.2f}]")
+    else:
+        print(f"Classes: {np.unique(y_train)}")
     
     return X_train, X_val, X_test, y_train, y_val, y_test
 

@@ -522,7 +522,7 @@ class TabularRANet(nn.Module):
             self.blocks.append(block)
             nIn = args.nChannels * args.scale_list[-1]  # Output of last scale
         
-        # Classifiers
+        # Classifiers (for both classification and regression)
         self.classifiers = nn.ModuleList()
         for i in range(self.nBlocks):
             classifier = nn.Sequential(

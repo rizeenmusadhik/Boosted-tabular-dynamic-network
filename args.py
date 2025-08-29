@@ -36,7 +36,7 @@ data_group.add_argument('--val_workers', default=1, type=int, metavar='N', help=
 data_group.add_argument('--num_features', type=int, default=100, help='number of input features for tabular data')
 data_group.add_argument('--num_classes', type=int, default=2, help='number of output classes for tabular data')
 data_group.add_argument('--tabular_dataset', type=str, default='custom', 
-                       choices=['custom', 'adult', 'heloc', 'covertype', 'credit', 'diabetes'], 
+                       choices=['custom', 'adult', 'heloc', 'covertype', 'california_housing', 'credit', 'diabetes'], 
                        help='specific tabular dataset to use')
 
 # model arch related
